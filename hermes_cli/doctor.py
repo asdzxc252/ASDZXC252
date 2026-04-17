@@ -936,8 +936,9 @@ def run_doctor(args):
         # Count disabled tools with API key requirements, but only for CLI-enabled toolsets
         # (disabled/default-off toolsets like 'rl' should not trigger the final summary)
         try:
-            from hermes_cli.tools_config import resolve_enabled_toolsets_for_platform
-            cli_enabled_toolsets = resolve_enabled_toolsets_for_platform("cli")
+            from hermes_cli.config import load_config
+            from hermes_cli.tools_config import _get_platform_tools
+            cli_enabled_toolsets = _get_platform_tools(load_config(), "cli")
         except Exception:
             cli_enabled_toolsets = None
         if cli_enabled_toolsets is not None:
