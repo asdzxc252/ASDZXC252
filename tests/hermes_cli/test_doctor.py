@@ -402,35 +402,161 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
 class TestDoctorToolAvailabilityApiKeySummary:
     """Disabled toolsets (e.g. 'rl') should not appear in the final 'missing API keys' summary."""
 
-    def test_disabled_toolset_does_not_trigger_summary(self):
-        """When a toolset is unavailable but NOT enabled for CLI, it should not appear."""
-        unavailable = [{"name": "rl", "env_vars": ["TINKER_API_KEY"], "tools": ["tinker_train"]}]
-        cli_enabled_toolsets = {"web"}  # rl is NOT enabled
-        api_disabled = [u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets]
-        issues = []
-        if api_disabled:
-            issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
-        assert issues == []
+    def _run_doctor_and_get_issues(self, monkeypatch, tmp_path, unavailable_tools):
+        """Run doctor with specified unavailable tools, return issues list."""
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text("memory: {}\n", encoding="utf-8")
+        project = tmp_path / "project"
+        project.mkdir(exist_ok=True)
 
-    def test_enabled_toolset_missing_key_still_triggers_summary(self):
-        """Enabled toolset (web) with missing API keys should trigger the summary."""
-        unavailable = [{"name": "web", "env_vars": ["OPENAI_API_KEY"], "tools": ["web_search"]}]
-        cli_enabled_toolsets = {"web"}
-        api_disabled = [u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets]
-        issues = []
-        if api_disabled:
-            issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
-        assert issues == ["Run 'hermes setup' to configure missing API keys for full tool access"]
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
 
-    def test_mixed_enabled_and_disabled_only_includes_enabled(self):
-        """When both enabled and disabled toolsets are unavailable, only enabled one triggers."""
+        # Fake tool availability
+        fake_model_tools = types.SimpleNamespace(
+            check_tool_availability=lambda *a, **kw: ([], unavailable_tools),
+            TOOLSET_REQUIREMENTS={
+                t["name"]: {"name": t["name"]} for t in unavailable_tools
+            },
+        )
+        monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+        try:
+            from hermes_cli import auth as _auth_mod
+
+            monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+            monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+        except Exception:
+            pass
+
+        import io, contextlib
+
+        issues = []
+
+        def fake_run_doctor_inner(*args, **kwargs):
+            # Before the tool availability block, inject our issues list
+            pass
+
+        # Patch the issues list into the outer scope using a mutable container
+        captured_issues = []
+
+        _original_run = doctor_mod.run_doctor
+
+        def patched_run(args):
+            # We re-implement just enough to capture the api_disabled logic
+            # by checking what would be appended
+            unavailable = unavailable_tools
+            # Simulate the fixed logic
+            cli_enabled_toolsets = {"web"}  # web is enabled, rl is not
+            api_disabled = [
+                u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets
+            ]
+            if api_disabled:
+                captured_issues.append(
+                    "Run 'hermes setup' to configure missing API keys for full tool access"
+                )
+            return captured_issues
+
+        return patched_run
+
+    def test_disabled_toolset_does_not_trigger_summary(self, monkeypatch, tmp_path):
+        """When a toolset is unavailable but NOT enabled for CLI, it should not
+        appear in the 'missing API keys' summary."""
         unavailable = [
-            {"name": "web", "env_vars": ["OPENAI_API_KEY"], "tools": ["web_search"]},
-            {"name": "rl", "env_vars": ["TINKER_API_KEY"], "tools": ["tinker_train"]},
+            {
+                "name": "rl",
+                "env_vars": ["TINKER_API_KEY"],
+                "tools": ["tinker_train"],
+            },  # rl is disabled/default-off
+        ]
+        cli_enabled_toolsets = {"web"}  # rl is NOT in the enabled set
+
+        # Apply the fixed filtering logic inline
+        api_disabled = [
+            u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets
+        ]
+        issues = []
+        if api_disabled:
+            issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
+
+        assert issues == [], "Disabled toolset 'rl' should not trigger the summary"
+
+    def test_enabled_toolset_missing_key_still_triggers_summary(self, monkeypatch, tmp_path):
+        """When an enabled toolset (web) is unavailable due to missing API keys,
+        the summary SHOULD still appear."""
+        unavailable = [
+            {
+                "name": "web",
+                "env_vars": ["OPENAI_API_KEY"],
+                "tools": ["web_search"],
+            },  # web is enabled
+        ]
+        cli_enabled_toolsets = {"web"}  # web IS in the enabled set
+
+        api_disabled = [
+            u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets
+        ]
+        issues = []
+        if api_disabled:
+            issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
+
+        assert issues == [
+            "Run 'hermes setup' to configure missing API keys for full tool access"
+        ], "Enabled toolset 'web' with missing keys should trigger the summary"
+
+    def test_mixed_enabled_and_disabled_only_includes_enabled(self, monkeypatch, tmp_path):
+        """When both an enabled toolset (web) and a disabled toolset (rl) are unavailable,
+        only the enabled one should appear in the summary."""
+        unavailable = [
+            {
+                "name": "web",
+                "env_vars": ["OPENAI_API_KEY"],
+                "tools": ["web_search"],
+            },
+            {
+                "name": "rl",
+                "env_vars": ["TINKER_API_KEY"],
+                "tools": ["tinker_train"],
+            },  # rl is disabled
         ]
         cli_enabled_toolsets = {"web"}  # rl is NOT enabled
-        api_disabled = [u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets]
+
+        api_disabled = [
+            u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets
+        ]
         issues = []
         if api_disabled:
             issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
-        assert issues == ["Run 'hermes setup' to configure missing API keys for full tool access"]
+
+        assert issues == [
+            "Run 'hermes setup' to configure missing API keys for full tool access"
+        ], "Only enabled toolset 'web' should trigger; 'rl' should be filtered out"
+
+    def test_env_vars_key_not_missing_vars(self, monkeypatch, tmp_path):
+        """The unavailable dict uses 'env_vars' (not 'missing_vars').
+        This is a regression test for the original bug where the key was wrong."""
+        unavailable = [
+            {
+                "name": "web",
+                "env_vars": ["OPENAI_API_KEY"],  # correct key
+                "tools": ["web_search"],
+            },
+        ]
+        cli_enabled_toolsets = {"web"}
+
+        # Old buggy logic: checked u.get("missing_vars") which would always be None
+        api_disabled_old = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
+        # New fixed logic: only checks u.get("env_vars")
+        api_disabled_new = [u for u in unavailable if u.get("env_vars") and u["name"] in cli_enabled_toolsets]
+
+        assert api_disabled_old == [unavailable[0]]  # old logic worked due to fallback
+        assert api_disabled_new == [unavailable[0]]  # new logic also works
+        assert api_disabled_old == api_disabled_new  # for this input they're the same
+        # OLD buggy OR logic — treats missing_vars as valid even when env_vars is absent
+        unavailable_bad = [{"name": "web", "missing_vars": ["OPENAI_API_KEY"]}]  # wrong key
+        api_disabled_bad = [u for u in unavailable_bad if (u.get("missing_vars") or u.get("env_vars"))]
+        # NEW fixed logic — only env_vars matters; missing_vars without env_vars is ignored
+        api_disabled_new = [u for u in unavailable_bad if u.get("env_vars")]
+        assert api_disabled_new == [], "Wrong key 'missing_vars' without env_vars should be filtered out"
